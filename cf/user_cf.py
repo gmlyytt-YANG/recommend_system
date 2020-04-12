@@ -66,6 +66,7 @@ class UserCF:
         """
         self.item_user_dict = {}
         self.user_item_rating_dict = {}
+        self.item_hot_rate = {} # hot-item balance
 
         for base_info in self.ratings:
             if len(base_info) < 4:
@@ -83,6 +84,11 @@ class UserCF:
                 self.item_user_dict[item] = [user]
             else:
                 self.item_user_dict[item].append(user)
+
+            if item not in self.item_hot_rate:
+                self.item_hot_rate[item] = 0
+            else:
+                self.item_hot_rate[item] += 1
 
     def format_user_dict(self, user_id_src, user_id_dst):
         """Generate item_rating_info_list.
@@ -129,7 +135,8 @@ class UserCF:
         for item in item_rating_info_list:
             src_square += item_rating_info_list[item][0] ** 2
             dst_square += item_rating_info_list[item][1] ** 2
-            src_dst_info += item_rating_info_list[item][0] * item_rating_info_list[item][1]
+            src_dst_info += item_rating_info_list[item][0] * item_rating_info_list[item][1] \
+                    * 1.0 / (np.log(1.0 + self.item_hot_rate[item]))
 
         if src_dst_info == 0.0:
             return 0.0
