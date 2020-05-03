@@ -2,227 +2,177 @@
 # -*- coding: utf-8 -*-
 ########################################################################
 #
-# Copyright (c) 2020 gmlyytt@outlook.com. All Rights Reserved
+# Copyright (c) 2020 gmlyytt@outlook.com, Inc. All Rights Reserved
 #
 ########################################################################
+
 """
-File: user_cf.py
+File: user_cf_v2.py
 Author: liyang(gmlyytt@outlook.com)
-Date: 2020/04/12 09:35:40
+Date: 2020/04/19 19:34:10
 """
 
-import numpy as np
 import os
-
-
-def read_file(file_path):
-    """read file
-
-    :param file_path:
-    :return: data_list:
-    """
-    if not os.path.exists(file_path):
-        print("there is no such file")
-        exit(-1)
-
-    fn = open(file_path, "r", encoding="utf-8")
-
-    data_list = []
-    for line in fn:
-        data = line.strip().split("::")
-        data_list.append(data)
-
-    return data_list
-
-class DataUnit:
-    """Self define sort unit."""
-
-    def __init__(self, unit, score):
-        self.unit = unit
-        self.score = score
-
-    def __lt__(self, other):
-        return self.score < other.score
-
+import random
+import math
+from operator import itemgetter
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+import time
+import numpy as np
 
 class UserCF:
-    """UserCF Class Definition.
-    
-    :param movies: movies meta info([index]::[Album]::[Category])
-    :param ratings: ratings info([user_id]::[item_id]::[rate]::[number])
-    :param neighbors_num: the number of neighbors of input user.
-    :param recommend_num: the number of recommend items of input user.
-    """
+    def __init__(self, user_item_pair_capacity=100000):
+        self.n_sim_user = 20
+        self.n_rec_movie = 10
 
-    def __init__(self, movies, ratings, neighbors_num, recommend_num):
-        self.movies = movies
-        self.ratings = ratings
-        self.neighbors_num = neighbors_num
-        self.recommend_num = recommend_num
+        self.train_set = {}
+        self.test_set = {}
 
-    def format_rating(self):
-        """generate user->[[item1, format_rate1], [item2, format_rate2], ..., [itemN, format_rateN]]
-        and item->[user1, user2, ..., userM]
-        """
-        self.item_user_dict = {}
-        self.user_item_rating_dict = {}
-        self.item_hot_rate = {} # hot-item balance
+        self.user_sim_matrix = {}
+        self.movie_count = 0
 
-        for base_info in self.ratings:
-            if len(base_info) < 4:
-                continue
-            user = base_info[0]
-            item = base_info[1]
-            rate = base_info[2]
+        self.user_item_pair_max_num = user_item_pair_capacity # train+test
 
-            if user not in self.user_item_rating_dict:
-                self.user_item_rating_dict[user] = [[item, float(rate) / 5]]
-            else:
-                self.user_item_rating_dict[user].append([item, float(rate) / 5])
-
-            if item not in self.item_user_dict:
-                self.item_user_dict[item] = [user]
-            else:
-                self.item_user_dict[item].append(user)
-
-            if item not in self.item_hot_rate:
-                self.item_hot_rate[item] = 0
-            else:
-                self.item_hot_rate[item] += 1
-
-    def format_user_dict(self, user_id_src, user_id_dst):
-        """Generate item_rating_info_list.
-        When item of self.user_item_rating_dict[user_id_dst] in self.user_item_rating_dict[user_id_src],
-        item_rating_info_list[item] = [rate_src, rate_dst]
-
-        Whne item of self.user_item_rating_dict[user_id_dst] not in self.user_item_rating_dict[user_id_src],
-        item_rating_info_list[item] = [0, rate_dst]
-
-        Whne item of self.user_item_rating_dict[user_id_src] not in self.user_item_rating_dict[user_id_dst],
-        item_rating_info_list[item] = [rate_src, 0]
-
-        :param user_id_src: 
-        :param user_id_dst:
-
-        :return: item_rating_info_list:
-        """
-        item_rating_info_list = {}
-
-        for item, rate in self.user_item_rating_dict[user_id_src]:
-            item_rating_info_list[item] = [rate, 0]
-
-        for item, rate in self.user_item_rating_dict[user_id_dst]:
-            if item not in item_rating_info_list:
-                item_rating_info_list[item] = [0, rate]
-            else:
-                item_rating_info_list[item][1] = rate
-
-        return item_rating_info_list
-
-    def get_cos_distance(self, user_id_src, user_id_dst):
-        """Get cos distance of user_id_src and user_id_dst.
-        
-        :param user_id_src: 
-        :param user_id_dst:
-
-        :return: cos_distance of user_id_src and user_id_dst
-        """
-        item_rating_info_list = self.format_user_dict(user_id_src, user_id_dst)
-        src_square = 0.0
-        dst_square = 0.0
-        src_dst_info = 0.0
-
-        for item in item_rating_info_list:
-            src_square += item_rating_info_list[item][0] ** 2
-            dst_square += item_rating_info_list[item][1] ** 2
-            src_dst_info += item_rating_info_list[item][0] * item_rating_info_list[item][1] \
-                    * 1.0 / (np.log(1.0 + self.item_hot_rate[item]))
-
-        if src_dst_info == 0.0:
-            return 0.0
-
-        return src_dst_info / np.sqrt(src_square + dst_square)
-
-    def get_nearest_neighbors(self, user_id):
-        """Get self.neighbors_num nearest users of input user_id.
-        
-        :param user_id:
-        """
-        neighbors = []
-
-        if user_id not in self.user_item_rating_dict:
-            print("user_id not in self.user_item_rating_dict")
+    def load_train_test_set(self, file_path, pivot=0.75):
+        if not os.path.exists(file_path):
+            print("no exists file")
             exit(-1)
 
-        for item, rate in self.user_item_rating_dict[user_id]:
-            if item not in self.item_user_dict:
+        fn = open(file_path, "r")
+        user_item_pair_count = 0
+        reach_user_item_pair_max_num = False
+        user_ctnr = set()
+        item_ctnr = set()
+        for line in fn:
+            if reach_user_item_pair_max_num:
+                break
+            data = line.strip().split(":")
+            if len(data) < 2:
                 continue
-            for candidate_user in self.item_user_dict[item]:
-                if candidate_user != user_id and candidate_user not in neighbors:
-                    neighbors.append(candidate_user)
+            user = data[0]
+            user_ctnr.add(user)
+            item_timestamp_list = data[1].split(";")
+            for item_timestamp in item_timestamp_list:
+                item_timestamp_elem_list = item_timestamp.split(",")
+                if len(item_timestamp_elem_list) < 3:
+                    continue
+                item = item_timestamp_elem_list[0]
+                item_ctnr.add(item)
+                if random.random() < pivot:
+                    self.train_set.setdefault(user, {})
+                    self.train_set[user][item] = 1.0
+                else:
+                    self.test_set.setdefault(user, {})
+                    self.test_set[user][item] = 1.0
+                user_item_pair_count += 1
+                if user_item_pair_count >= self.user_item_pair_max_num:
+                    reach_user_item_pair_max_num = True
+                    break
 
-        self.neighbors = []
-        for candidate_user in neighbors:
-            if candidate_user not in self.user_item_rating_dict:
-                continue
-            cos_distance = self.get_cos_distance(user_id, candidate_user)
-            self.neighbors.append(DataUnit(candidate_user, cos_distance))
+    def calc_user_sim(self):
+        movie_popular = {}
+        for _, movies in self.train_set.items():
+            for movie in movies:
+                if movie not in movie_popular:
+                    movie_popular.setdefault(movie, 0)
+                movie_popular[movie] += 1
 
-        self.neighbors.sort(reverse=True)
-        self.neighbors = self.neighbors[:self.neighbors_num]
+        movie_user = {}
+        for user, movies in self.train_set.items():
+            for movie in movies:
+                if movie not in movie_user:
+                    movie_user[movie] = set()
+                movie_user[movie].add(user)
 
-    def get_recommend_list(self):
-        """Get recommend list of user_id.
+        self.movie_count = len(movie_user)
 
-        :return recommend_list:
-        """
-        recommend_list = []
-        for neighbor in self.neighbors:
-            item_rating_list = self.user_item_rating_dict[neighbor.unit]
-            for item, rate in item_rating_list:
-                recommend_list.append(DataUnit(item, rate))
+        for movie, users in movie_user.items():
+            for u in users:
+                for v in users:
+                    if u == v:
+                        continue
+                    self.user_sim_matrix.setdefault(u, {})
+                    self.user_sim_matrix[u].setdefault(v, 0)
+                    self.user_sim_matrix[u][v] += 1.0 / np.log(1.0 + movie_popular[movie])
 
-        recommend_list.sort(reverse=True)
-        recommend_list = [_.unit for _ in recommend_list][:self.recommend_num]
+        for u, related_users in self.user_sim_matrix.items():
+            for v, wuv_raw in related_users.items():
+                self.user_sim_matrix[u][v] = \
+                        wuv_raw / math.sqrt(len(self.train_set[u]) * len(self.train_set[v]))
 
-        return recommend_list
+    def recommend(self, user):
+        K = self.n_sim_user
+        N = self.n_rec_movie
+        rank = {}
+        if user not in self.train_set:
+            return []
+        watched_movies = self.train_set[user]
+        if user not in self.user_sim_matrix:
+            return []
+        user_sim_vec = sorted(self.user_sim_matrix[user].items(), key=itemgetter(1), reverse=True)[:K]
+        for v, wuv in user_sim_vec:
+            for movie, rating in self.train_set[v].items():
+                if movie in watched_movies:
+                    continue
+                rank.setdefault(movie, 0)
+                rank[movie] += wuv * rating
 
-    def recommend(self, user_id):
-        """Entry of recommend.
+        return sorted(rank.items(), key=itemgetter(1), reverse=True)[:N]
 
-        :param user_id:
-        :return: recommend_list:
-        """
-        self.format_rating()
-        self.get_nearest_neighbors(user_id)
-        recommend_list = self.get_recommend_list()
+    def evaluate(self):
+        hit = 0
+        rec_count = 0
+        test_count = 0
+        all_rec_movies = set()
+        for user in self.train_set:
+            test_movies = self.test_set.get(user, {})
+            rec_movies = self.recommend(user)
 
-        return recommend_list
+            for movie, w in rec_movies:
+                if movie in test_movies:
+                    hit += 1
+                all_rec_movies.add(movie)
 
-    def get_precision(self, user_id, recommend_list):
-        """Get precision of this recommend algorithm.
+            rec_count += len(rec_movies)
+            test_count += len(test_movies)
 
-        :param user_id:
-        :param recommend_list:
-        """
-        user_real_like_items = [_[0] for _ in self.user_item_rating_dict[user_id]]
+        precision = hit / (1.0 * rec_count)
+        recall = hit / (1.0 * test_count)
+        coverage = len(all_rec_movies) / (1.0 * self.movie_count)
+        print("precision is: {}, recall is {}, coverage is: {}".format(precision, recall, coverage))
 
-        count = 0
-        for item in recommend_list:
-            if item in user_real_like_items:
-                count += 1
-        print("precision is: {}".format(float(count) / len(recommend_list)))
+        return precision, recall, coverage
 
 
 if __name__ == "__main__":
-    movies = read_file("../data/MovieLens/movies.dat")
-    ratings = read_file("../data/MovieLens/ratings_top_100000.dat")
+    file_path = "xx.data"
 
-    neighbors_num = 7
-    recommend_num = 10
+    precision_list = []
+    recall_list = []
+    coverage_list = []
+    user_item_pair_capacity_list = []
 
-    user_id = "6"
-    user_cf = UserCF(movies, ratings, neighbors_num, recommend_num)
-    recommend_list = user_cf.recommend(user_id)
+    for user_item_pair_capacity in range(100000, 1000000, 100000):
+        start = time.time()
+        user_cf = UserCF(user_item_pair_capacity)
+        user_cf.load_train_test_set(file_path)
+        user_cf.calc_user_sim()
+        precision, recall, coverage = user_cf.evaluate()
+        precision_list.append(precision)
+        recall_list.append(recall)
+        coverage_list.append(coverage)
+        user_item_pair_capacity_list.append(user_item_pair_capacity)
+        end = time.time()
+        time_past = end - start
+        print("time_past in user_item_pair_capacity {} is {}".format(user_item_pair_capacity, time_past))
+        print("---")
 
-    user_cf.get_precision(user_id, recommend_list)
+    plt.title("usercf")
+    plt.plot(user_item_pair_capacity_list, precision_list, label="precision")
+    plt.plot(user_item_pair_capacity_list, recall_list, label="recall")
+    plt.plot(user_item_pair_capacity_list, coverage_list, label="coverage")
+
+    plt.legend()
+    plt.savefig("./usercf_result.png")
